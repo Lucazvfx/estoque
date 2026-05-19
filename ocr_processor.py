@@ -5,6 +5,9 @@ import re
 from PIL import Image
 import io
 
+tesseract_path = os.environ.get('TESSERACT_CMD', '/usr/bin/tesseract')
+pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
 def preprocess_image(image_bytes):
     # Carrega imagem a partir dos bytes
     nparr = np.frombuffer(image_bytes, np.uint8)
