@@ -4,6 +4,7 @@ import pytesseract
 import re
 from PIL import Image
 import io
+import os
 
 tesseract_path = os.environ.get('TESSERACT_CMD', '/usr/bin/tesseract')
 pytesseract.pytesseract.tesseract_cmd = tesseract_path
