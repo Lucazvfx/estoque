@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Gestão de Estoque</title>
+    <!-- Bibliotecas -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <button class="menu-toggle" onclick="window.toggleSidebar()">☰</button>
+    <div class="install-prompt" id="installPrompt" style="display:none;">
+        <button class="install-prompt-close" onclick="window.hideInstallPrompt()">×</button>
+        <div id="installMsg"></div>
+        <button class="btn" id="installActionBtn">Instalar</button>
+    </div>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <div class="logo-icon">G</div>
+            <div class="logo-text">Gestão<span> Estoque</span></div>
+        </div>
+        <nav class="sidebar-nav" id="sidebarNav"></nav>
+        <div class="sidebar-footer">© Lucas Vinicius</div>
+    </aside>
+    <main class="main-content" id="mainContent">
+        <div id="appContent">Carregando...</div>
+    </main>
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header"><h3 id="modalTitle"></h3><button class="modal-close" onclick="window.closeModal()">×</button></div>
+            <div class="modal-body" id="modalBody"></div>
+            <div class="modal-footer" id="modalFooter"></div>
+        </div>
+    </div>
+    <div class="toast-container" id="toastContainer"></div>
+    <script src="script.js"></script>
+</body>
+</html>
