@@ -1,0 +1,1314 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calculadora de Frete - Transferência entre Lojas</title>
+<!--
+  Calculadora de Frete - Transferência entre Lojas
+  Arquivo único, sem dependências externas. Abra direto no navegador.
+  Dados (lojas, rotas, parâmetros) ficam no localStorage do navegador.
+
+  Ordem de cálculo (inspirada na cotação SSW):
+    Peso cubado  = cubagem (m³) x fator (padrão 300 kg/m³)
+    Peso cálculo = max(peso real, peso cubado)
+    Frete peso   = faixa de peso da rota (se houver) + excedente x R$/kg
+    Frete valor  = NF x % frete valor
+    GRIS         = NF x % GRIS
+    Pedágio      = ceil(peso cálculo / 100) x valor da fração
+    Taxas        = despacho + TAS + outras
+    Subtotal     = max(frete mínimo, soma das parcelas)
+    Ajustado     = subtotal x (1 - desconto% + acréscimo%)
+    Total        = ajustado / (1 - ICMS%)  (ICMS "por dentro", se ativado)
+-->
+<style>
+  :root {
+    --navy: #0f2a4a;
+    --navy-2: #1d4070;
+    --slate: #475569;
+    --slate-2: #64748b;
+    --line: #dbe2ea;
+    --bg: #f1f4f8;
+    --white: #fff;
+    --ok: #15803d;
+    --warn-bg: #fff7e6;
+    --warn: #b45309;
+    --err-bg: #fdecec;
+    --err: #b91c1c;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; } /* garante que .row (display:grid) respeite o atributo hidden */
+  body {
+    margin: 0; font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    background: var(--bg); color: #1e293b; font-size: 15px;
+  }
+  header {
+    background: var(--navy); color: #fff; padding: 14px 24px;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header h1 small { display: block; font-weight: 400; font-size: 12px; color: #b8c7dc; }
+  nav.tabs { display: flex; gap: 6px; }
+  nav.tabs button {
+    background: transparent; color: #cdd8e6; border: 1px solid #36557f; padding: 8px 14px;
+    border-radius: 6px; cursor: pointer; font-size: 14px;
+  }
+  nav.tabs button.active { background: #fff; color: var(--navy); border-color: #fff; font-weight: 600; }
+  main { max-width: 1280px; margin: 0 auto; padding: 20px; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+
+  /* Layout em duas colunas no desktop, empilhado no celular */
+  .sim-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; align-items: start; }
+  @media (max-width: 920px) { .sim-grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--white); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; margin-bottom: 18px;
+  }
+  .card h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--slate);
+    margin: 0 0 14px; font-weight: 700;
+  }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  label { display: block; font-size: 12.5px; color: var(--slate); margin-bottom: 4px; font-weight: 600; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 9px 10px; border: 1px solid #c5cfdb; border-radius: 6px;
+    font-size: 15px; background: #fff; color: #0f172a;
+  }
+  input:focus, select:focus { outline: 2px solid #9ab8e0; border-color: var(--navy-2); }
+  input.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .hint { font-size: 12px; color: var(--slate-2); margin-top: 4px; }
+  .inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .radio-group { display: flex; gap: 16px; margin-bottom: 10px; flex-wrap: wrap; }
+  .radio-group label, .check label { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: #1e293b; margin: 0; cursor: pointer; }
+
+  .route-info {
+    margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  }
+  .badge {
+    display: inline-block; padding: 5px 10px; border-radius: 6px; font-size: 13px;
+    background: #e8eef7; color: var(--navy); font-weight: 600;
+  }
+  .badge.code { font-family: Consolas, monospace; font-size: 14px; background: var(--navy); color: #fff; }
+  .alert { padding: 10px 12px; border-radius: 6px; font-size: 13.5px; margin-top: 12px; }
+  .alert.warn { background: var(--warn-bg); color: var(--warn); border: 1px solid #f5d199; }
+  .alert.err { background: var(--err-bg); color: var(--err); border: 1px solid #f3b9b9; }
+  .alert.info { background: #eef4fb; color: var(--navy-2); border: 1px solid #cddcf0; }
+
+  button.btn {
+    background: var(--navy); color: #fff; border: 0; padding: 9px 14px; border-radius: 6px;
+    cursor: pointer; font-size: 14px; font-weight: 600;
+  }
+  button.btn:hover { background: var(--navy-2); }
+  button.btn.sec { background: #fff; color: var(--navy); border: 1px solid #b6c4d6; }
+  button.btn.sec:hover { background: #f3f6fa; }
+  button.btn.danger { background: #fff; color: var(--err); border: 1px solid #efc0c0; }
+  button.btn.sm { padding: 5px 9px; font-size: 12.5px; }
+
+  /* Painel de resultado (fixo à direita no desktop) */
+  .result { position: sticky; top: 16px; }
+  @media (max-width: 920px) { .result { position: static; } }
+  .total-box {
+    background: var(--navy); color: #fff; border-radius: var(--radius); padding: 18px; margin-bottom: 14px;
+  }
+  .total-box .lbl { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #b8c7dc; }
+  .total-box .val { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .total-box .sub { font-size: 12.5px; color: #cdd8e6; margin-top: 4px; }
+  table.parcelas { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.parcelas td { padding: 6px 2px; border-bottom: 1px dashed var(--line); }
+  table.parcelas td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  table.parcelas tr.zero td { color: #a3aebb; }
+  table.parcelas tr.strong td { font-weight: 700; border-bottom: 1px solid #b6c4d6; }
+  .kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
+  .kpi { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .kpi .lbl { font-size: 11.5px; color: var(--slate); text-transform: uppercase; letter-spacing: .05em; }
+  .kpi .val { font-size: 20px; font-weight: 700; color: var(--navy); font-variant-numeric: tabular-nums; }
+  .kpi.alarm { background: var(--warn-bg); border-color: #f5d199; }
+  .kpi.alarm .val { color: var(--warn); }
+  .pesos { font-size: 13px; color: var(--slate); display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+  .pesos b { display: block; color: #0f172a; font-variant-numeric: tabular-nums; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .actions .btn { flex: 1; }
+
+  /* Tabelas de configuração */
+  .tbl-wrap { overflow-x: auto; }
+  table.cfg { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.cfg th { text-align: left; color: var(--slate); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; padding: 8px 6px; border-bottom: 2px solid var(--line); white-space: nowrap; }
+  table.cfg td { padding: 8px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.cfg td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.cfg tr.editing td { background: #eef4fb; }
+  .form-box { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+  .faixas-table td { padding: 4px; }
+  .faixas-table input { width: 120px; }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #0f172a; color: #fff;
+    padding: 10px 18px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 50;
+  }
+  .toast.show { opacity: .95; }
+  .muted { color: var(--slate-2); }
+  .print-only { display: none; }
+
+  /* Impressão / PDF: só o resumo da cotação */
+  @media print {
+    body { background: #fff; }
+    header, nav, .no-print, .sim-grid > .form-col, #tab-config { display: none !important; }
+    .sim-grid { display: block; }
+    .result { position: static; }
+    .total-box { background: #fff; color: #000; border: 2px solid #000; }
+    .total-box .lbl, .total-box .sub { color: #333; }
+    .print-only { display: block; }
+    .card { border: 1px solid #999; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Calculadora de Frete <small>Transferência entre Lojas</small></h1>
+  <nav class="tabs">
+    <button type="button" data-tab="tab-sim" class="active">Simulador de Frete</button>
+    <button type="button" data-tab="tab-config">Lojas e Tabela de Fretes</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ======================= ABA 1: SIMULADOR ======================= -->
+  <section id="tab-sim" class="tab active">
+    <div class="sim-grid">
+      <div class="form-col">
+        <div class="card">
+          <h2>Rota</h2>
+          <div class="row">
+            <div>
+              <label for="origem">Loja de Origem</label>
+              <select id="origem"></select>
+            </div>
+            <div>
+              <label for="destino">Loja de Destino</label>
+              <select id="destino"></select>
+            </div>
+          </div>
+          <div class="route-info" id="routeInfo"></div>
+          <div id="routeAlert"></div>
+        </div>
+
+        <div class="card">
+          <h2>Dados da Carga</h2>
+          <div class="row">
+            <div>
+              <label for="valorNF">Valor da NF (R$)</label>
+              <input type="text" id="valorNF" class="num" inputmode="decimal" value="1.600,00" data-fmt="money">
+            </div>
+            <div>
+              <label for="peso">Peso Real (kg)</label>
+              <input type="text" id="peso" class="num" inputmode="decimal" value="30,000" data-fmt="kg">
+            </div>
+            <div>
+              <label for="volumes">Quantidade de Volumes</label>
+              <input type="number" id="volumes" class="num" min="1" step="1" value="1">
+            </div>
+          </div>
+
+          <div style="margin-top:16px">
+            <label>Cubagem</label>
+            <div class="radio-group">
+              <label><input type="radio" name="cubMode" value="direta" checked> Informar cubagem (m³)</label>
+              <label><input type="radio" name="cubMode" value="dims"> Calcular por dimensões (cm)</label>
+            </div>
+            <div id="cubDireta" class="row">
+              <div>
+                <label for="cubagem">Cubagem total (m³)</label>
+                <input type="text" id="cubagem" class="num" inputmode="decimal" value="0,0000" data-fmt="m3">
+              </div>
+            </div>
+            <div id="cubDims" class="row" hidden>
+              <div><label for="dimC">Comprimento (cm)</label><input type="text" id="dimC" class="num" inputmode="decimal" placeholder="0"></div>
+              <div><label for="dimL">Largura (cm)</label><input type="text" id="dimL" class="num" inputmode="decimal" placeholder="0"></div>
+              <div><label for="dimA">Altura (cm)</label><input type="text" id="dimA" class="num" inputmode="decimal" placeholder="0"></div>
+            </div>
+            <div class="hint" id="cubHint"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Ajustes da Proposta</h2>
+          <div class="row">
+            <div>
+              <label for="desconto">Desconto (%)</label>
+              <input type="text" id="desconto" class="num" inputmode="decimal" value="0,00" data-fmt="pct">
+            </div>
+            <div>
+              <label for="acrescimo">Acréscimo (%)</label>
+              <input type="text" id="acrescimo" class="num" inputmode="decimal" value="0,00" data-fmt="pct">
+            </div>
+            <div class="check" style="align-self:end;padding-bottom:10px">
+              <label><input type="checkbox" id="incluirICMS" checked> Incluir ICMS (por dentro)</label>
+            </div>
+          </div>
+          <div class="actions no-print" style="margin-top:14px">
+            <button type="button" class="btn sec" id="btnLimpar">Limpar carga</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Resumo da cotação -->
+      <aside class="result">
+        <div class="card">
+          <div class="print-only" id="printHeader"></div>
+          <div class="total-box">
+            <div class="lbl">Valor total do frete</div>
+            <div class="val" id="rTotal">R$ 0,00</div>
+            <div class="sub" id="rTotalSub">&nbsp;</div>
+          </div>
+
+          <div class="pesos">
+            <div>Peso real<b id="rPesoReal">0,000 kg</b></div>
+            <div>Peso cubado<b id="rPesoCub">0,000 kg</b></div>
+            <div>Peso cálculo<b id="rPesoCalc">0,000 kg</b></div>
+          </div>
+
+          <table class="parcelas" id="rParcelas"></table>
+
+          <div class="kpis">
+            <div class="kpi"><div class="lbl">Frete / Kg</div><div class="val" id="rFreteKg">R$ 0,00</div></div>
+            <div class="kpi" id="kpiPct"><div class="lbl">% Frete / Valor NF</div><div class="val" id="rPctNF">0,00%</div></div>
+          </div>
+          <div id="resultAlerts"></div>
+
+          <div class="actions no-print" style="margin-top:12px">
+            <button type="button" class="btn" id="btnCopiar">Copiar Resumo da Cotação</button>
+            <button type="button" class="btn sec" id="btnImprimir">Imprimir / Salvar PDF</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ======================= ABA 2: CONFIGURAÇÕES ======================= -->
+  <section id="tab-config" class="tab">
+    <div class="card">
+      <h2>Lojas</h2>
+      <form id="lojaForm" class="form-box" autocomplete="off">
+        <input type="hidden" id="lojaEditId">
+        <div class="row">
+          <div><label for="lojaSigla">Sigla</label><input type="text" id="lojaSigla" maxlength="6" placeholder="VLHP" required></div>
+          <div><label for="lojaNome">Nome</label><input type="text" id="lojaNome" placeholder="Loja Vilhena" required></div>
+          <div><label for="lojaCidade">Cidade</label><input type="text" id="lojaCidade" placeholder="Vilhena" required></div>
+          <div><label for="lojaUF">UF</label><input type="text" id="lojaUF" maxlength="2" placeholder="RO" required></div>
+          <div><label for="lojaCEP">CEP</label><input type="text" id="lojaCEP" maxlength="9" placeholder="76980-001" inputmode="numeric" required></div>
+        </div>
+        <div class="inline" style="margin-top:12px">
+          <button type="submit" class="btn" id="lojaSubmit">Adicionar loja</button>
+          <button type="button" class="btn sec" id="lojaCancel" hidden>Cancelar edição</button>
+        </div>
+      </form>
+      <div class="tbl-wrap"><table class="cfg" id="lojasTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Tabela de Fretes por Rota (Origem → Destino)</h2>
+      <form id="rotaForm" class="form-box" autocomplete="off">
+        <input type="hidden" id="rotaEditId">
+        <div class="row">
+          <div><label for="rotaOrigem">Origem</label><select id="rotaOrigem"></select></div>
+          <div><label for="rotaDestino">Destino</label><select id="rotaDestino"></select></div>
+        </div>
+        <div class="row" id="rotaFields" style="margin-top:12px"></div>
+
+        <div style="margin-top:14px">
+          <label>Faixas de peso (opcional)</label>
+          <div class="hint" style="margin-bottom:6px">
+            Com faixas: o frete peso é o valor da primeira faixa que comporta o peso cálculo; acima da última faixa,
+            soma-se (peso − limite da última faixa) × Frete Peso R$/kg. Sem faixas: peso cálculo × R$/kg.
+          </div>
+          <table class="faixas-table" id="faixasTable"></table>
+          <button type="button" class="btn sec sm" id="addFaixa">+ Adicionar faixa</button>
+        </div>
+
+        <div class="inline" style="margin-top:14px">
+          <button type="submit" class="btn" id="rotaSubmit">Salvar rota</button>
+          <button type="button" class="btn sec" id="rotaCancel" hidden>Cancelar edição</button>
+        </div>
+        <div id="rotaFormMsg"></div>
+      </form>
+      <div class="tbl-wrap"><table class="cfg" id="rotasTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Parâmetros Gerais</h2>
+      <div class="row">
+        <div>
+          <label for="fatorCubagem">Fator de cubagem (kg/m³)</label>
+          <input type="text" id="fatorCubagem" class="num" inputmode="decimal">
+          <div class="hint">Padrão rodoviário: 300 kg/m³.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Dados</h2>
+      <div class="inline">
+        <button type="button" class="btn sec" id="btnExportJSON">Exportar JSON</button>
+        <button type="button" class="btn sec" id="btnExportCSV">Exportar CSV</button>
+        <button type="button" class="btn sec" id="btnImport">Importar JSON / CSV</button>
+        <input type="file" id="importFile" accept=".json,.csv,application/json,text/csv" hidden>
+        <button type="button" class="btn danger" id="btnReset">Restaurar Dados de Exemplo</button>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        A importação <b>substitui</b> todas as lojas e rotas atuais. CSV usa separador “;” (abre direto no Excel).
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+/* =====================================================================
+   1. DADOS DE EXEMPLO (SEED)
+   ===================================================================== */
+const STORAGE_KEY = 'calcFreteLojas.v1';
+
+const SEED = {
+  versao: 1,
+  config: { fatorCubagem: 300 },
+  lojas: [
+    { sigla: 'VLHP', nome: 'Loja Vilhena',     cidade: 'Vilhena',     uf: 'RO', cep: '76980-001' },
+    { sigla: 'PVHP', nome: 'Loja Porto Velho', cidade: 'Porto Velho', uf: 'RO', cep: '76800-001' },
+    { sigla: 'JIPA', nome: 'Loja Ji-Paraná',   cidade: 'Ji-Paraná',   uf: 'RO', cep: '76900-001' },
+    { sigla: 'CACO', nome: 'Loja Cacoal',      cidade: 'Cacoal',      uf: 'RO', cep: '76960-001' }
+  ],
+  rotas: [
+    {
+      origem: 'VLHP', destino: 'PVHP',
+      freteMinimo: 45.00, fretePesoKg: 0, freteValorPct: 4.62, grisPct: 0,
+      pedagioFracao: 5.00, despacho: 0, tas: 0, outrasTaxas: 0,
+      icmsPct: 0, prazoDias: 3, faixas: []
+    }
+  ]
+};
+
+/* Campos tarifários da rota: [chave, rótulo, tipo de formatação] */
+const ROTA_CAMPOS = [
+  ['freteMinimo',   'Frete Mínimo (R$)',             'money'],
+  ['fretePesoKg',   'Frete Peso (R$/kg)',            'rate'],
+  ['freteValorPct', 'Frete Valor / Ad Valorem (%)',  'pct'],
+  ['grisPct',       'GRIS (%)',                      'pct'],
+  ['pedagioFracao', 'Pedágio / fração 100 kg (R$)',  'money'],
+  ['despacho',      'Despacho (R$)',                 'money'],
+  ['tas',           'TAS (R$)',                      'money'],
+  ['outrasTaxas',   'Outras taxas (R$)',             'money'],
+  ['icmsPct',       'Alíquota ICMS (%)',             'pct'],
+  ['prazoDias',     'Prazo de entrega (dias úteis)', 'int']
+];
+
+/* =====================================================================
+   2. UTILITÁRIOS: números no formato brasileiro, arredondamento, HTML
+   ===================================================================== */
+const r2 = n => Math.round((n + Number.EPSILON) * 100) / 100;
+const r3 = n => Math.round((n + Number.EPSILON) * 1000) / 1000;
+
+/** Converte "1.600,00", "1600", "30,5" ou "30.5" em número. Vazio/ inválido -> 0. */
+function parseBR(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  let s = String(v ?? '').trim().replace(/[R$\s%]/g, '');
+  if (!s) return 0;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.'); // vírgula = decimal; ponto = milhar
+  const n = parseFloat(s);
+  return isFinite(n) ? n : 0;
+}
+const fmtNum = (n, d) => Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtBRL = n => 'R$ ' + fmtNum(n, 2);
+const fmtPct = n => fmtNum(n, 2) + '%';
+const fmtKg  = n => fmtNum(n, 3) + ' kg';
+
+/** Formatação aplicada ao sair do campo (blur), conforme data-fmt. */
+const FORMATTERS = {
+  money: n => fmtNum(n, 2),
+  pct:   n => fmtNum(n, 2),
+  kg:    n => fmtNum(n, 3),
+  m3:    n => fmtNum(n, 4),
+  rate:  n => fmtNum(n, 4),
+  int:   n => String(Math.max(0, Math.round(n)))
+};
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+const $ = id => document.getElementById(id);
+const clone = o => JSON.parse(JSON.stringify(o));
+const rotaId = (o, d) => `${o}-${d}`;
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+/** Soma N dias úteis (seg–sex) a uma data. Feriados não são considerados. */
+function addDiasUteis(data, dias) {
+  const d = new Date(data.getFullYear(), data.getMonth(), data.getDate());
+  let n = Math.max(0, Math.round(dias));
+  while (n > 0) {
+    d.setDate(d.getDate() + 1);
+    const w = d.getDay();
+    if (w !== 0 && w !== 6) n--;
+  }
+  return d;
+}
+const fmtData = d => d.toLocaleDateString('pt-BR');
+
+/* =====================================================================
+   3. PERSISTÊNCIA (localStorage) E VALIDAÇÃO DE DADOS
+   ===================================================================== */
+
+/** Normaliza/valida uma estrutura de dados (usado no load e na importação). Lança Error se inválida. */
+function normalizarDB(raw) {
+  if (!raw || typeof raw !== 'object') throw new Error('Arquivo sem dados.');
+  if (!Array.isArray(raw.lojas) || !Array.isArray(raw.rotas)) throw new Error('Estrutura inválida: faltam "lojas" ou "rotas".');
+
+  const lojas = [];
+  const siglas = new Set();
+  for (const l of raw.lojas) {
+    const sigla = String(l?.sigla ?? '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{2,6}$/.test(sigla)) throw new Error(`Sigla de loja inválida: "${l?.sigla ?? ''}".`);
+    if (siglas.has(sigla)) throw new Error(`Sigla duplicada: ${sigla}.`);
+    siglas.add(sigla);
+    lojas.push({
+      sigla,
+      nome: String(l.nome ?? '').trim() || sigla,
+      cidade: String(l.cidade ?? '').trim(),
+      uf: String(l.uf ?? '').trim().toUpperCase().slice(0, 2),
+      cep: formatCEP(String(l.cep ?? ''))
+    });
+  }
+
+  const rotas = [];
+  const ids = new Set();
+  for (const r of raw.rotas) {
+    const origem = String(r?.origem ?? '').trim().toUpperCase();
+    const destino = String(r?.destino ?? '').trim().toUpperCase();
+    if (!siglas.has(origem) || !siglas.has(destino)) throw new Error(`Rota ${origem}-${destino} referencia loja inexistente.`);
+    if (origem === destino) throw new Error(`Rota ${origem}-${destino}: origem igual ao destino.`);
+    const id = rotaId(origem, destino);
+    if (ids.has(id)) throw new Error(`Rota duplicada: ${id}.`);
+    ids.add(id);
+    const rota = { origem, destino };
+    for (const [k, , tipo] of ROTA_CAMPOS) {
+      const n = parseBR(r[k]);
+      if (n < 0) throw new Error(`Rota ${id}: "${k}" negativo.`);
+      rota[k] = tipo === 'int' ? Math.round(n) : n;
+    }
+    if (rota.icmsPct >= 100) throw new Error(`Rota ${id}: ICMS deve ser menor que 100%.`);
+    rota.faixas = normalizarFaixas(r.faixas, id);
+    rotas.push(rota);
+  }
+
+  const fator = parseBR(raw.config?.fatorCubagem);
+  return { versao: 1, config: { fatorCubagem: fator > 0 ? fator : 300 }, lojas, rotas };
+}
+
+function normalizarFaixas(faixas, id) {
+  if (!Array.isArray(faixas)) return [];
+  const out = faixas
+    .map(f => ({ ate: parseBR(f?.ate), valor: parseBR(f?.valor) }))
+    .filter(f => f.ate > 0);
+  if (out.some(f => f.valor < 0)) throw new Error(`Rota ${id}: faixa com valor negativo.`);
+  out.sort((a, b) => a.ate - b.ate);
+  for (let i = 1; i < out.length; i++) {
+    if (out[i].ate === out[i - 1].ate) throw new Error(`Rota ${id}: faixas com o mesmo limite (${out[i].ate} kg).`);
+  }
+  return out;
+}
+
+function carregar() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return normalizarDB(JSON.parse(raw));
+  } catch (e) {
+    console.warn('Dados salvos inválidos; usando dados de exemplo.', e);
+  }
+  return clone(SEED);
+}
+
+function salvar() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  } catch (e) {
+    toast('Não foi possível salvar no navegador (localStorage indisponível).');
+  }
+}
+
+let db = carregar();
+
+const getLoja = sigla => db.lojas.find(l => l.sigla === sigla);
+const getRota = (o, d) => db.rotas.find(r => r.origem === o && r.destino === d);
+const lojaLabel = l => `${l.sigla} - ${l.nome} (${l.cidade}/${l.uf} - CEP ${l.cep})`;
+
+function formatCEP(v) {
+  const d = String(v).replace(/\D/g, '').slice(0, 8);
+  return d.length > 5 ? d.slice(0, 5) + '-' + d.slice(5) : d;
+}
+
+/* =====================================================================
+   4. MOTOR DE CÁLCULO (função pura, sem DOM)
+   ===================================================================== */
+
+/** Frete peso: faixas da rota (se houver) + excedente por kg; sem faixas, peso × R$/kg. */
+function calcFretePeso(peso, rota) {
+  if (peso <= 0) return 0;
+  const faixas = rota.faixas || [];
+  if (!faixas.length) return peso * rota.fretePesoKg;
+  const faixa = faixas.find(f => peso <= f.ate);
+  if (faixa) return faixa.valor;
+  const ultima = faixas[faixas.length - 1];
+  return ultima.valor + (peso - ultima.ate) * rota.fretePesoKg;
+}
+
+/**
+ * Calcula a cotação.
+ * @param {object} rota   parâmetros tarifários da rota
+ * @param {object} carga  { valorNF, pesoReal, cubagem }
+ * @param {object} opts   { fatorCubagem, incluirICMS, descontoPct, acrescimoPct }
+ */
+function calcularFrete(rota, carga, opts) {
+  const valorNF  = Math.max(0, carga.valorNF || 0);
+  const pesoReal = Math.max(0, carga.pesoReal || 0);
+  const cubagem  = Math.max(0, carga.cubagem || 0);
+  const fator    = opts.fatorCubagem > 0 ? opts.fatorCubagem : 300;
+
+  const pesoCubado = r3(cubagem * fator);
+  const pesoCalculo = r3(Math.max(pesoReal, pesoCubado));
+
+  const fretePeso  = r2(calcFretePeso(pesoCalculo, rota));
+  const freteValor = r2(valorNF * rota.freteValorPct / 100);
+  const gris       = r2(valorNF * rota.grisPct / 100);
+  // Fração de 100 kg iniciada é cobrada inteira (30 kg = 1 fração; 100 kg = 1; 100,001 kg = 2)
+  const fracoes    = pesoCalculo > 0 ? Math.ceil(pesoCalculo / 100) : 0;
+  const pedagio    = r2(fracoes * rota.pedagioFracao);
+  const despacho   = r2(rota.despacho);
+  const tas        = r2(rota.tas);
+  const outras     = r2(rota.outrasTaxas);
+
+  const somaParcelas = r2(fretePeso + freteValor + gris + pedagio + despacho + tas + outras);
+  const minimoAplicado = rota.freteMinimo > somaParcelas;
+  const subtotal = minimoAplicado ? r2(rota.freteMinimo) : somaParcelas;
+
+  const descontoPct  = Math.max(0, opts.descontoPct || 0);
+  const acrescimoPct = Math.max(0, opts.acrescimoPct || 0);
+  const desconto  = r2(subtotal * descontoPct / 100);
+  const acrescimo = r2(subtotal * acrescimoPct / 100);
+  const baseICMS  = Math.max(0, r2(subtotal - desconto + acrescimo));
+
+  // ICMS "por dentro": o imposto compõe a própria base -> total = base / (1 - alíquota)
+  const aplicaICMS = !!opts.incluirICMS && rota.icmsPct > 0;
+  const total = aplicaICMS ? r2(baseICMS / (1 - rota.icmsPct / 100)) : baseICMS;
+  const icms  = r2(total - baseICMS);
+
+  return {
+    pesoReal, pesoCubado, pesoCalculo, fracoes,
+    fretePeso, freteValor, gris, pedagio, despacho, tas, outras,
+    somaParcelas, minimoAplicado, freteMinimo: rota.freteMinimo, subtotal,
+    descontoPct, desconto, acrescimoPct, acrescimo, baseICMS,
+    icmsPct: aplicaICMS ? rota.icmsPct : 0, icms, total,
+    fretePorKg: pesoCalculo > 0 ? total / pesoCalculo : 0,
+    pctNF: valorNF > 0 ? total / valorNF * 100 : 0,
+    valorNF
+  };
+}
+window.calcularFrete = calcularFrete; // exposto para testes no console
+
+/* =====================================================================
+   5. SIMULADOR (UI)
+   ===================================================================== */
+const PCT_ALERTA = 8; // % frete/NF acima disso gera alerta visual
+let ultimoResultado = null;
+
+function preencherSelectsSimulador() {
+  const o = $('origem'), d = $('destino');
+  const vo = o.value, vd = d.value;
+  const opts = db.lojas.map(l => `<option value="${esc(l.sigla)}">${esc(lojaLabel(l))}</option>`).join('');
+  o.innerHTML = opts;
+  d.innerHTML = opts;
+  // Mantém a seleção anterior se ainda existir; senão, usa a primeira rota cadastrada
+  const primeira = db.rotas[0];
+  o.value = getLoja(vo) ? vo : (primeira ? primeira.origem : (db.lojas[0]?.sigla ?? ''));
+  d.value = getLoja(vd) && vd !== o.value ? vd : (primeira && primeira.origem === o.value ? primeira.destino : '');
+  sincronizarDestino();
+}
+
+/** Impede destino igual à origem: desabilita a opção e troca a seleção se necessário. */
+function sincronizarDestino() {
+  const o = $('origem').value, d = $('destino');
+  for (const opt of d.options) opt.disabled = opt.value === o;
+  if (!d.value || d.value === o) {
+    // Prefere um destino que tenha rota cadastrada a partir desta origem
+    const comRota = db.rotas.find(r => r.origem === o);
+    const alvo = comRota ? comRota.destino : db.lojas.find(l => l.sigla !== o)?.sigla;
+    d.value = alvo ?? '';
+  }
+}
+
+function lerCubagem() {
+  const modo = document.querySelector('input[name=cubMode]:checked').value;
+  const volumes = Math.max(1, Math.round(parseBR($('volumes').value)) || 1);
+  if (modo === 'dims') {
+    const c = parseBR($('dimC').value), l = parseBR($('dimL').value), a = parseBR($('dimA').value);
+    const m3 = (c * l * a) / 1e6 * volumes; // cm³ -> m³, por volume
+    $('cubHint').textContent = `Cubagem calculada: ${fmtNum(c, 0)} × ${fmtNum(l, 0)} × ${fmtNum(a, 0)} cm × ${volumes} vol. = ${fmtNum(m3, 4)} m³`;
+    return m3;
+  }
+  $('cubHint').textContent = 'Cubagem total da carga (todos os volumes).';
+  return parseBR($('cubagem').value);
+}
+
+function calcular() {
+  const o = $('origem').value, d = $('destino').value;
+  const lo = getLoja(o), ld = getLoja(d);
+  const rota = lo && ld && o !== d ? getRota(o, d) : null;
+
+  // Informações da rota
+  const info = $('routeInfo'), alerta = $('routeAlert');
+  info.innerHTML = '';
+  alerta.innerHTML = '';
+  if (!lo || !ld || o === d) {
+    alerta.innerHTML = `<div class="alert err">Cadastre ao menos duas lojas para simular.</div>`;
+  } else if (!rota) {
+    info.innerHTML = `<span class="badge code">${esc(rotaId(o, d))}</span>`;
+    alerta.innerHTML = `<div class="alert err">Rota <b>${esc(rotaId(o, d))}</b> sem tarifa cadastrada.
+      <button type="button" class="btn sm" id="btnCadastrarRota" style="margin-left:8px">Cadastrar esta rota</button></div>`;
+    $('btnCadastrarRota').onclick = () => { abrirAba('tab-config'); novaRota(o, d); };
+  } else {
+    const prev = addDiasUteis(new Date(), rota.prazoDias);
+    info.innerHTML = `<span class="badge code">${esc(rotaId(o, d))}</span>
+      <span class="badge">Prazo: ${rota.prazoDias} dia${rota.prazoDias === 1 ? '' : 's'} út${rota.prazoDias === 1 ? 'il' : 'eis'}</span>
+      <span class="badge">Previsão de entrega: ${fmtData(prev)}</span>`;
+  }
+
+  const cubagem = lerCubagem();
+  if (!rota) {
+    ultimoResultado = null;
+    renderResultado(null);
+    return;
+  }
+
+  const res = calcularFrete(rota, {
+    valorNF: parseBR($('valorNF').value),
+    pesoReal: parseBR($('peso').value),
+    cubagem
+  }, {
+    fatorCubagem: db.config.fatorCubagem,
+    incluirICMS: $('incluirICMS').checked,
+    descontoPct: parseBR($('desconto').value),
+    acrescimoPct: parseBR($('acrescimo').value)
+  });
+  res.rota = rota;
+  res.lojaOrigem = lo;
+  res.lojaDestino = ld;
+  res.volumes = Math.max(1, Math.round(parseBR($('volumes').value)) || 1);
+  res.cubagem = cubagem;
+  res.previsao = addDiasUteis(new Date(), rota.prazoDias);
+  ultimoResultado = res;
+  renderResultado(res);
+}
+
+function renderResultado(res) {
+  const tbl = $('rParcelas'), alerts = $('resultAlerts');
+  if (!res) {
+    $('rTotal').textContent = 'R$ —';
+    $('rTotalSub').innerHTML = 'Selecione uma rota com tarifa cadastrada';
+    ['rPesoReal', 'rPesoCub', 'rPesoCalc'].forEach(id => $(id).textContent = '—');
+    tbl.innerHTML = '';
+    $('rFreteKg').textContent = '—';
+    $('rPctNF').textContent = '—';
+    $('kpiPct').classList.remove('alarm');
+    alerts.innerHTML = '';
+    $('btnCopiar').disabled = $('btnImprimir').disabled = true;
+    return;
+  }
+  $('btnCopiar').disabled = $('btnImprimir').disabled = false;
+
+  $('rTotal').textContent = fmtBRL(res.total);
+  $('rTotalSub').textContent = `Rota ${rotaId(res.rota.origem, res.rota.destino)} · ${res.lojaOrigem.cidade}/${res.lojaOrigem.uf} → ${res.lojaDestino.cidade}/${res.lojaDestino.uf}`;
+  $('rPesoReal').textContent = fmtKg(res.pesoReal);
+  $('rPesoCub').textContent = fmtKg(res.pesoCubado);
+  $('rPesoCalc').textContent = fmtKg(res.pesoCalculo);
+
+  const linha = (rotulo, valor, cls = '') =>
+    `<tr class="${cls || (valor === 0 ? 'zero' : '')}"><td>${rotulo}</td><td>${fmtBRL(valor)}</td></tr>`;
+  let html = '';
+  html += linha('Frete Peso', res.fretePeso);
+  html += linha(`Frete Valor (${fmtPct(res.rota.freteValorPct)})`, res.freteValor);
+  html += linha(`GRIS (${fmtPct(res.rota.grisPct)})`, res.gris);
+  html += linha(`Pedágio (${res.fracoes} × ${fmtBRL(res.rota.pedagioFracao)})`, res.pedagio);
+  html += linha('Despacho', res.despacho);
+  html += linha('TAS', res.tas);
+  if (res.outras) html += linha('Outras taxas', res.outras);
+  html += linha('Soma das parcelas', res.somaParcelas, 'strong');
+  if (res.minimoAplicado) html += linha('Frete mínimo aplicado', res.subtotal, 'strong');
+  if (res.desconto) html += linha(`Desconto (${fmtPct(res.descontoPct)})`, -res.desconto);
+  if (res.acrescimo) html += linha(`Acréscimo (${fmtPct(res.acrescimoPct)})`, res.acrescimo);
+  html += linha(`ICMS${res.icmsPct ? ` (${fmtPct(res.icmsPct)} por dentro)` : ''}`, res.icms);
+  html += linha('Total do frete', res.total, 'strong');
+  tbl.innerHTML = html;
+
+  $('rFreteKg').textContent = fmtBRL(res.fretePorKg);
+  $('rPctNF').textContent = fmtPct(res.pctNF);
+  $('kpiPct').classList.toggle('alarm', res.pctNF > PCT_ALERTA);
+
+  const msgs = [];
+  if (res.pctNF > PCT_ALERTA) msgs.push(`<div class="alert warn">Frete representa ${fmtPct(res.pctNF)} do valor da NF (acima de ${PCT_ALERTA}%). Avalie consolidar a carga.</div>`);
+  if (res.minimoAplicado) msgs.push(`<div class="alert info">Frete mínimo da rota (${fmtBRL(res.freteMinimo)}) aplicado: as parcelas somaram ${fmtBRL(res.somaParcelas)}.</div>`);
+  if (res.desconto && res.baseICMS < res.freteMinimo) msgs.push(`<div class="alert warn">O desconto deixou o frete abaixo do mínimo da rota (${fmtBRL(res.freteMinimo)}).</div>`);
+  if (res.pesoCubado > res.pesoReal) msgs.push(`<div class="alert info">Peso cubado maior que o real: cálculo pelo peso cubado.</div>`);
+  if (!$('incluirICMS').checked && res.rota.icmsPct > 0) msgs.push(`<div class="alert warn">ICMS de ${fmtPct(res.rota.icmsPct)} da rota não incluído no total.</div>`);
+  if (res.pesoCalculo === 0) msgs.push(`<div class="alert warn">Informe o peso ou a cubagem da carga.</div>`);
+  alerts.innerHTML = msgs.join('');
+
+  $('printHeader').innerHTML = `<h2 style="margin:0 0 6px">Cotação de Frete - Transferência entre Lojas</h2>
+    <div style="font-size:13px;margin-bottom:10px">Emitida em ${fmtData(new Date())} ·
+    ${esc(lojaLabel(res.lojaOrigem))} → ${esc(lojaLabel(res.lojaDestino))}<br>
+    NF ${fmtBRL(res.valorNF)} · ${res.volumes} vol. · Cubagem ${fmtNum(res.cubagem, 4)} m³ ·
+    Prazo ${res.rota.prazoDias} dias úteis (prev. ${fmtData(res.previsao)})</div>`;
+}
+
+/** Texto limpo para WhatsApp/e-mail (só parcelas com valor). */
+function textoResumo(res) {
+  const L = [];
+  L.push('*COTAÇÃO DE FRETE - TRANSFERÊNCIA ENTRE LOJAS*');
+  L.push(`Data: ${fmtData(new Date())}`);
+  L.push(`Rota: ${rotaId(res.rota.origem, res.rota.destino)}`);
+  L.push(`Origem: ${res.lojaOrigem.nome} - ${res.lojaOrigem.cidade}/${res.lojaOrigem.uf} (CEP ${res.lojaOrigem.cep})`);
+  L.push(`Destino: ${res.lojaDestino.nome} - ${res.lojaDestino.cidade}/${res.lojaDestino.uf} (CEP ${res.lojaDestino.cep})`);
+  L.push(`Prazo: ${res.rota.prazoDias} dias úteis (previsão ${fmtData(res.previsao)})`);
+  L.push('');
+  L.push(`Valor da NF: ${fmtBRL(res.valorNF)}`);
+  L.push(`Peso real: ${fmtKg(res.pesoReal)} | Volumes: ${res.volumes} | Cubagem: ${fmtNum(res.cubagem, 4)} m³`);
+  L.push(`Peso cálculo: ${fmtKg(res.pesoCalculo)}`);
+  L.push('');
+  L.push('*Composição*');
+  const p = [
+    ['Frete Peso', res.fretePeso], ['Frete Valor', res.freteValor], ['GRIS', res.gris],
+    ['Pedágio', res.pedagio], ['Despacho', res.despacho], ['TAS', res.tas], ['Outras taxas', res.outras]
+  ];
+  for (const [n, v] of p) if (v) L.push(`${n}: ${fmtBRL(v)}`);
+  if (res.minimoAplicado) L.push(`Frete mínimo aplicado: ${fmtBRL(res.subtotal)}`);
+  if (res.desconto) L.push(`Desconto (${fmtPct(res.descontoPct)}): -${fmtBRL(res.desconto)}`);
+  if (res.acrescimo) L.push(`Acréscimo (${fmtPct(res.acrescimoPct)}): ${fmtBRL(res.acrescimo)}`);
+  if (res.icms) L.push(`ICMS (${fmtPct(res.icmsPct)}): ${fmtBRL(res.icms)}`);
+  L.push('');
+  L.push(`*TOTAL DO FRETE: ${fmtBRL(res.total)}*`);
+  L.push(`Frete/kg: ${fmtBRL(res.fretePorKg)} | Frete/NF: ${fmtPct(res.pctNF)}`);
+  return L.join('\n');
+}
+
+async function copiarResumo() {
+  if (!ultimoResultado) return;
+  const txt = textoResumo(ultimoResultado);
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast('Resumo copiado!');
+  } catch {
+    // Fallback para navegadores que bloqueiam a Clipboard API (ex.: arquivo local)
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    toast(ok ? 'Resumo copiado!' : 'Não foi possível copiar automaticamente.');
+  }
+}
+
+/* =====================================================================
+   6. CONFIGURAÇÕES: LOJAS
+   ===================================================================== */
+function renderLojas() {
+  const t = $('lojasTable');
+  const editId = $('lojaEditId').value;
+  t.innerHTML = `<tr><th>Sigla</th><th>Nome</th><th>Cidade/UF</th><th>CEP</th><th>Rotas</th><th></th></tr>` +
+    db.lojas.map(l => {
+      const nRotas = db.rotas.filter(r => r.origem === l.sigla || r.destino === l.sigla).length;
+      return `<tr class="${l.sigla === editId ? 'editing' : ''}">
+        <td><b>${esc(l.sigla)}</b></td><td>${esc(l.nome)}</td><td>${esc(l.cidade)}/${esc(l.uf)}</td><td>${esc(l.cep)}</td>
+        <td class="num">${nRotas}</td>
+        <td><button type="button" class="btn sec sm" data-edit-loja="${esc(l.sigla)}">Editar</button>
+            <button type="button" class="btn danger sm" data-del-loja="${esc(l.sigla)}">Excluir</button></td></tr>`;
+    }).join('');
+}
+
+function resetLojaForm() {
+  $('lojaForm').reset();
+  $('lojaEditId').value = '';
+  $('lojaSubmit').textContent = 'Adicionar loja';
+  $('lojaCancel').hidden = true;
+  renderLojas();
+}
+
+function salvarLoja(ev) {
+  ev.preventDefault();
+  const editId = $('lojaEditId').value;
+  const loja = {
+    sigla: $('lojaSigla').value.trim().toUpperCase(),
+    nome: $('lojaNome').value.trim(),
+    cidade: $('lojaCidade').value.trim(),
+    uf: $('lojaUF').value.trim().toUpperCase(),
+    cep: formatCEP($('lojaCEP').value)
+  };
+  if (!/^[A-Z0-9]{2,6}$/.test(loja.sigla)) return toast('Sigla: 2 a 6 letras/números.');
+  if (!/^[A-Z]{2}$/.test(loja.uf)) return toast('UF inválida.');
+  if (!/^\d{5}-\d{3}$/.test(loja.cep)) return toast('CEP inválido (00000-000).');
+  if (loja.sigla !== editId && getLoja(loja.sigla)) return toast(`Já existe loja com sigla ${loja.sigla}.`);
+
+  if (editId) {
+    const idx = db.lojas.findIndex(l => l.sigla === editId);
+    db.lojas[idx] = loja;
+    // Renomeia a sigla nas rotas que a usam
+    if (editId !== loja.sigla) {
+      for (const r of db.rotas) {
+        if (r.origem === editId) r.origem = loja.sigla;
+        if (r.destino === editId) r.destino = loja.sigla;
+      }
+    }
+    toast('Loja atualizada.');
+  } else {
+    db.lojas.push(loja);
+    toast('Loja adicionada.');
+  }
+  salvar();
+  resetLojaForm();
+  atualizarTudo();
+}
+
+function editarLoja(sigla) {
+  const l = getLoja(sigla);
+  if (!l) return;
+  $('lojaEditId').value = l.sigla;
+  $('lojaSigla').value = l.sigla;
+  $('lojaNome').value = l.nome;
+  $('lojaCidade').value = l.cidade;
+  $('lojaUF').value = l.uf;
+  $('lojaCEP').value = l.cep;
+  $('lojaSubmit').textContent = 'Salvar alterações';
+  $('lojaCancel').hidden = false;
+  renderLojas();
+  $('lojaSigla').focus();
+}
+
+function excluirLoja(sigla) {
+  const nRotas = db.rotas.filter(r => r.origem === sigla || r.destino === sigla).length;
+  const msg = nRotas ? `Excluir a loja ${sigla} e as ${nRotas} rota(s) ligadas a ela?` : `Excluir a loja ${sigla}?`;
+  if (!confirm(msg)) return;
+  db.lojas = db.lojas.filter(l => l.sigla !== sigla);
+  db.rotas = db.rotas.filter(r => r.origem !== sigla && r.destino !== sigla);
+  salvar();
+  if ($('lojaEditId').value === sigla) resetLojaForm();
+  atualizarTudo();
+  toast('Loja excluída.');
+}
+
+/* =====================================================================
+   7. CONFIGURAÇÕES: ROTAS / TABELA DE FRETES
+   ===================================================================== */
+function montarCamposRota() {
+  $('rotaFields').innerHTML = ROTA_CAMPOS.map(([k, rot, tipo]) =>
+    `<div><label for="rf_${k}">${rot}</label>
+     <input type="text" id="rf_${k}" class="num" inputmode="decimal" data-fmt="${tipo}"></div>`).join('');
+}
+
+function preencherSelectsRota() {
+  const opts = db.lojas.map(l => `<option value="${esc(l.sigla)}">${esc(l.sigla)} - ${esc(l.nome)}</option>`).join('');
+  for (const id of ['rotaOrigem', 'rotaDestino']) {
+    const s = $(id), v = s.value;
+    s.innerHTML = opts;
+    if (getLoja(v)) s.value = v;
+  }
+}
+
+function renderFaixas(faixas) {
+  const t = $('faixasTable');
+  if (!faixas.length) { t.innerHTML = '<tr><td class="muted">Nenhuma faixa (usa só R$/kg).</td></tr>'; return; }
+  t.innerHTML = '<tr><th style="text-align:left;font-size:12px">Até (kg)</th><th style="text-align:left;font-size:12px">Valor (R$)</th><th></th></tr>' +
+    faixas.map((f, i) => `<tr>
+      <td><input type="text" class="num faixa-ate" inputmode="decimal" value="${fmtNum(f.ate, 3)}" data-fmt="kg"></td>
+      <td><input type="text" class="num faixa-valor" inputmode="decimal" value="${fmtNum(f.valor, 2)}" data-fmt="money"></td>
+      <td><button type="button" class="btn danger sm" data-del-faixa="${i}">Remover</button></td></tr>`).join('');
+}
+
+function lerFaixasForm() {
+  return [...$('faixasTable').querySelectorAll('tr')]
+    .filter(tr => tr.querySelector('.faixa-ate'))
+    .map(tr => ({ ate: parseBR(tr.querySelector('.faixa-ate').value), valor: parseBR(tr.querySelector('.faixa-valor').value) }));
+}
+
+function preencherFormRota(r) {
+  $('rotaOrigem').value = r.origem;
+  $('rotaDestino').value = r.destino;
+  for (const [k, , tipo] of ROTA_CAMPOS) $('rf_' + k).value = FORMATTERS[tipo](r[k] || 0);
+  renderFaixas(r.faixas || []);
+}
+
+function novaRota(origem, destino) {
+  $('rotaEditId').value = '';
+  const base = { origem: origem || db.lojas[0]?.sigla, destino: destino || db.lojas[1]?.sigla, faixas: [] };
+  for (const [k] of ROTA_CAMPOS) base[k] = 0;
+  preencherFormRota(base);
+  $('rotaSubmit').textContent = 'Adicionar rota';
+  $('rotaCancel').hidden = !origem;
+  $('rotaFormMsg').innerHTML = origem ? `<div class="alert info">Preencha as tarifas da rota ${esc(rotaId(origem, destino))}.</div>` : '';
+  renderRotas();
+  if (origem) { $('rotaForm').scrollIntoView({ behavior: 'smooth' }); $('rf_freteMinimo').focus(); }
+}
+
+function editarRota(id) {
+  const r = db.rotas.find(x => rotaId(x.origem, x.destino) === id);
+  if (!r) return;
+  $('rotaEditId').value = id;
+  preencherFormRota(r);
+  $('rotaSubmit').textContent = 'Salvar alterações';
+  $('rotaCancel').hidden = false;
+  $('rotaFormMsg').innerHTML = '';
+  renderRotas();
+  $('rotaForm').scrollIntoView({ behavior: 'smooth' });
+}
+
+function salvarRota(ev) {
+  ev.preventDefault();
+  const editId = $('rotaEditId').value;
+  const rota = { origem: $('rotaOrigem').value, destino: $('rotaDestino').value };
+  if (!rota.origem || !rota.destino) return toast('Cadastre as lojas antes das rotas.');
+  if (rota.origem === rota.destino) return toast('Origem e destino devem ser diferentes.');
+  for (const [k, , tipo] of ROTA_CAMPOS) {
+    const n = parseBR($('rf_' + k).value);
+    if (n < 0) return toast('Valores não podem ser negativos.');
+    rota[k] = tipo === 'int' ? Math.round(n) : n;
+  }
+  if (rota.icmsPct >= 100) return toast('ICMS deve ser menor que 100%.');
+  const id = rotaId(rota.origem, rota.destino);
+  try {
+    rota.faixas = normalizarFaixas(lerFaixasForm(), id);
+  } catch (e) {
+    return toast(e.message);
+  }
+  if (id !== editId && getRota(rota.origem, rota.destino)) return toast(`A rota ${id} já existe. Use "Editar".`);
+
+  if (editId) {
+    const idx = db.rotas.findIndex(r => rotaId(r.origem, r.destino) === editId);
+    db.rotas[idx] = rota;
+    toast('Rota atualizada.');
+  } else {
+    db.rotas.push(rota);
+    toast('Rota adicionada.');
+  }
+  salvar();
+  novaRota();
+  atualizarTudo();
+}
+
+function excluirRota(id) {
+  if (!confirm(`Excluir a rota ${id}?`)) return;
+  db.rotas = db.rotas.filter(r => rotaId(r.origem, r.destino) !== id);
+  salvar();
+  if ($('rotaEditId').value === id) novaRota();
+  atualizarTudo();
+  toast('Rota excluída.');
+}
+
+/** Cria a rota inversa (destino -> origem) copiando as tarifas. */
+function duplicarInversa(id) {
+  const r = db.rotas.find(x => rotaId(x.origem, x.destino) === id);
+  if (!r) return;
+  if (getRota(r.destino, r.origem)) return toast(`A rota ${rotaId(r.destino, r.origem)} já existe.`);
+  const inv = clone(r);
+  inv.origem = r.destino;
+  inv.destino = r.origem;
+  db.rotas.push(inv);
+  salvar();
+  atualizarTudo();
+  toast(`Rota ${rotaId(inv.origem, inv.destino)} criada com as mesmas tarifas.`);
+}
+
+function renderRotas() {
+  const t = $('rotasTable');
+  const editId = $('rotaEditId').value;
+  const total = db.lojas.length * (db.lojas.length - 1);
+  if (!db.rotas.length) {
+    t.innerHTML = '<tr><td class="muted">Nenhuma rota cadastrada.</td></tr>';
+    return;
+  }
+  t.innerHTML = `<caption style="text-align:left;font-size:12.5px;color:var(--slate);padding-bottom:6px">
+      ${db.rotas.length} de ${total} rotas possíveis cadastradas (cada sentido é uma rota).</caption>
+    <tr><th>Rota</th><th>Mínimo</th><th>R$/kg</th><th>Faixas</th><th>Frete Valor</th><th>GRIS</th><th>Pedágio/100kg</th>
+    <th>Despacho</th><th>TAS</th><th>Outras</th><th>ICMS</th><th>Prazo</th><th></th></tr>` +
+    db.rotas.map(r => {
+      const id = rotaId(r.origem, r.destino);
+      return `<tr class="${id === editId ? 'editing' : ''}">
+        <td><b>${esc(id)}</b></td>
+        <td class="num">${fmtBRL(r.freteMinimo)}</td><td class="num">${fmtNum(r.fretePesoKg, 4)}</td>
+        <td class="num">${r.faixas.length || '-'}</td>
+        <td class="num">${fmtPct(r.freteValorPct)}</td><td class="num">${fmtPct(r.grisPct)}</td>
+        <td class="num">${fmtBRL(r.pedagioFracao)}</td><td class="num">${fmtBRL(r.despacho)}</td>
+        <td class="num">${fmtBRL(r.tas)}</td><td class="num">${fmtBRL(r.outrasTaxas)}</td>
+        <td class="num">${fmtPct(r.icmsPct)}</td><td class="num">${r.prazoDias} d</td>
+        <td><button type="button" class="btn sec sm" data-edit-rota="${esc(id)}">Editar</button>
+            <button type="button" class="btn sec sm" data-inv-rota="${esc(id)}" title="Criar rota no sentido contrário">Inversa</button>
+            <button type="button" class="btn danger sm" data-del-rota="${esc(id)}">Excluir</button></td></tr>`;
+    }).join('');
+}
+
+/* =====================================================================
+   8. EXPORTAR / IMPORTAR (JSON e CSV) E RESTAURAR
+   ===================================================================== */
+function baixar(nome, conteudo, mime) {
+  const blob = new Blob([conteudo], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = nome;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const hoje = () => new Date().toISOString().slice(0, 10);
+
+function exportarJSON() {
+  baixar(`tabela-fretes-${hoje()}.json`, JSON.stringify(db, null, 2), 'application/json');
+}
+
+/*
+  Formato CSV (separador ";", decimais com vírgula, compatível com Excel pt-BR):
+    tipo;sigla;nome;cidade;uf;cep;origem;destino;<campos da rota>;faixas
+  - Linhas LOJA preenchem sigla..cep; linhas ROTA preenchem origem, destino, tarifas e faixas.
+  - Faixas: "até=valor" separados por "|", ex.: 10=12,50|30=20,00
+  - Linha CONFIG: fatorCubagem na coluna "nome".
+*/
+const CSV_COLS = ['tipo', 'sigla', 'nome', 'cidade', 'uf', 'cep', 'origem', 'destino', ...ROTA_CAMPOS.map(c => c[0]), 'faixas'];
+
+function csvCampo(v) {
+  const s = String(v ?? '');
+  return /[;"\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function exportarCSV() {
+  const linhas = [CSV_COLS.join(';')];
+  const vazio = () => Object.fromEntries(CSV_COLS.map(c => [c, '']));
+  const cfg = vazio(); cfg.tipo = 'CONFIG'; cfg.nome = fmtNum(db.config.fatorCubagem, 2);
+  linhas.push(CSV_COLS.map(c => csvCampo(cfg[c])).join(';'));
+  for (const l of db.lojas) {
+    const o = vazio(); Object.assign(o, { tipo: 'LOJA', sigla: l.sigla, nome: l.nome, cidade: l.cidade, uf: l.uf, cep: l.cep });
+    linhas.push(CSV_COLS.map(c => csvCampo(o[c])).join(';'));
+  }
+  for (const r of db.rotas) {
+    const o = vazio(); o.tipo = 'ROTA'; o.origem = r.origem; o.destino = r.destino;
+    for (const [k, , tipo] of ROTA_CAMPOS) o[k] = tipo === 'int' ? String(r[k]) : fmtNum(r[k], tipo === 'rate' ? 4 : 2).replace(/\./g, '');
+    o.faixas = r.faixas.map(f => `${fmtNum(f.ate, 3).replace(/\./g, '')}=${fmtNum(f.valor, 2).replace(/\./g, '')}`).join('|');
+    linhas.push(CSV_COLS.map(c => csvCampo(o[c])).join(';'));
+  }
+  // BOM para o Excel reconhecer UTF-8 (acentos)
+  baixar(`tabela-fretes-${hoje()}.csv`, '﻿' + linhas.join('\r\n'), 'text/csv;charset=utf-8');
+}
+
+/** Parser CSV simples com suporte a aspas. Detecta separador ";" ou ",". */
+function parseCSV(texto) {
+  texto = texto.replace(/^﻿/, '');
+  const primeira = texto.split(/\r?\n/, 1)[0];
+  const sep = primeira.includes(';') ? ';' : ',';
+  const rows = [];
+  let row = [], campo = '', aspas = false;
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (aspas) {
+      if (c === '"' && texto[i + 1] === '"') { campo += '"'; i++; }
+      else if (c === '"') aspas = false;
+      else campo += c;
+    } else if (c === '"') aspas = true;
+    else if (c === sep) { row.push(campo); campo = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && texto[i + 1] === '\n') i++;
+      row.push(campo); rows.push(row); row = []; campo = '';
+    } else campo += c;
+  }
+  if (campo || row.length) { row.push(campo); rows.push(row); }
+  return rows.filter(r => r.some(v => v.trim() !== ''));
+}
+
+function csvParaDB(texto) {
+  const rows = parseCSV(texto);
+  if (rows.length < 2) throw new Error('CSV vazio.');
+  const head = rows[0].map(h => h.trim());
+  const idx = Object.fromEntries(head.map((h, i) => [h, i]));
+  if (!('tipo' in idx)) throw new Error('CSV sem coluna "tipo".');
+  const get = (r, c) => (idx[c] !== undefined ? (r[idx[c]] ?? '').trim() : '');
+  const out = { config: {}, lojas: [], rotas: [] };
+  for (const r of rows.slice(1)) {
+    const tipo = get(r, 'tipo').toUpperCase();
+    if (tipo === 'CONFIG') out.config.fatorCubagem = parseBR(get(r, 'nome'));
+    else if (tipo === 'LOJA') out.lojas.push({ sigla: get(r, 'sigla'), nome: get(r, 'nome'), cidade: get(r, 'cidade'), uf: get(r, 'uf'), cep: get(r, 'cep') });
+    else if (tipo === 'ROTA') {
+      const rota = { origem: get(r, 'origem'), destino: get(r, 'destino') };
+      for (const [k] of ROTA_CAMPOS) rota[k] = get(r, k);
+      rota.faixas = get(r, 'faixas').split('|').filter(Boolean).map(p => {
+        const [ate, valor] = p.split('=');
+        return { ate, valor };
+      });
+      out.rotas.push(rota);
+    }
+  }
+  return out;
+}
+
+function importarArquivo(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const texto = String(reader.result);
+      const ehJSON = /\.json$/i.test(file.name) || texto.trim().startsWith('{');
+      const novo = normalizarDB(ehJSON ? JSON.parse(texto) : csvParaDB(texto));
+      if (!novo.lojas.length) throw new Error('Nenhuma loja no arquivo.');
+      if (!confirm(`Importar ${novo.lojas.length} loja(s) e ${novo.rotas.length} rota(s)? Os dados atuais serão substituídos.`)) return;
+      db = novo;
+      salvar();
+      resetLojaForm();
+      novaRota();
+      atualizarTudo();
+      toast('Tabela importada com sucesso.');
+    } catch (e) {
+      alert('Falha ao importar: ' + e.message);
+    }
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+function restaurarExemplo() {
+  if (!confirm('Restaurar os dados de exemplo? Todas as lojas e rotas atuais serão perdidas.')) return;
+  db = clone(SEED);
+  salvar();
+  resetLojaForm();
+  novaRota();
+  atualizarTudo();
+  toast('Dados de exemplo restaurados.');
+}
+
+/* =====================================================================
+   9. LIGAÇÕES DE EVENTOS E INICIALIZAÇÃO
+   ===================================================================== */
+function abrirAba(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === id));
+  document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
+}
+
+function atualizarTudo() {
+  preencherSelectsSimulador();
+  preencherSelectsRota();
+  renderLojas();
+  renderRotas();
+  $('fatorCubagem').value = fmtNum(db.config.fatorCubagem, 2);
+  calcular();
+}
+
+function init() {
+  montarCamposRota();
+
+  document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => abrirAba(b.dataset.tab)));
+
+  // Formatação ao sair do campo (máscaras numéricas) em todo o documento
+  document.addEventListener('focusout', ev => {
+    const el = ev.target;
+    if (el.matches && el.matches('input[data-fmt]')) el.value = FORMATTERS[el.dataset.fmt](parseBR(el.value));
+  });
+  // Ao focar um campo numérico, seleciona o conteúdo para facilitar a digitação
+  document.addEventListener('focusin', ev => {
+    if (ev.target.matches && ev.target.matches('input.num')) ev.target.select();
+  });
+
+  // Recalcula a cada alteração no simulador
+  $('tab-sim').addEventListener('input', calcular);
+  $('tab-sim').addEventListener('change', calcular);
+  $('origem').addEventListener('change', () => { sincronizarDestino(); calcular(); });
+  document.querySelectorAll('input[name=cubMode]').forEach(r => r.addEventListener('change', () => {
+    const dims = document.querySelector('input[name=cubMode]:checked').value === 'dims';
+    $('cubDims').hidden = !dims;
+    $('cubDireta').hidden = dims;
+  }));
+  $('btnLimpar').addEventListener('click', () => {
+    $('valorNF').value = '0,00'; $('peso').value = '0,000'; $('volumes').value = '1';
+    $('cubagem').value = '0,0000'; $('dimC').value = $('dimL').value = $('dimA').value = '';
+    $('desconto').value = $('acrescimo').value = '0,00';
+    calcular();
+    $('valorNF').focus();
+  });
+  $('btnCopiar').addEventListener('click', copiarResumo);
+  $('btnImprimir').addEventListener('click', () => window.print());
+
+  // Lojas
+  $('lojaForm').addEventListener('submit', salvarLoja);
+  $('lojaCancel').addEventListener('click', resetLojaForm);
+  $('lojaCEP').addEventListener('input', e => { e.target.value = formatCEP(e.target.value); });
+  $('lojasTable').addEventListener('click', ev => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    if (b.dataset.editLoja) editarLoja(b.dataset.editLoja);
+    if (b.dataset.delLoja) excluirLoja(b.dataset.delLoja);
+  });
+
+  // Rotas
+  $('rotaForm').addEventListener('submit', salvarRota);
+  $('rotaCancel').addEventListener('click', () => novaRota());
+  $('addFaixa').addEventListener('click', () => {
+    const f = lerFaixasForm();
+    const ultimo = f.length ? f[f.length - 1].ate : 0;
+    f.push({ ate: ultimo + 10, valor: 0 });
+    renderFaixas(f);
+  });
+  $('faixasTable').addEventListener('click', ev => {
+    const b = ev.target.closest('[data-del-faixa]');
+    if (!b) return;
+    const f = lerFaixasForm();
+    f.splice(Number(b.dataset.delFaixa), 1);
+    renderFaixas(f);
+  });
+  $('rotasTable').addEventListener('click', ev => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    if (b.dataset.editRota) editarRota(b.dataset.editRota);
+    if (b.dataset.invRota) duplicarInversa(b.dataset.invRota);
+    if (b.dataset.delRota) excluirRota(b.dataset.delRota);
+  });
+
+  // Parâmetros gerais
+  $('fatorCubagem').addEventListener('change', e => {
+    const n = parseBR(e.target.value);
+    if (n <= 0) { toast('Fator de cubagem deve ser maior que zero.'); e.target.value = fmtNum(db.config.fatorCubagem, 2); return; }
+    db.config.fatorCubagem = n;
+    salvar();
+    calcular();
+    toast('Fator de cubagem salvo.');
+  });
+
+  // Dados
+  $('btnExportJSON').addEventListener('click', exportarJSON);
+  $('btnExportCSV').addEventListener('click', exportarCSV);
+  $('btnImport').addEventListener('click', () => $('importFile').click());
+  $('importFile').addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (f) importarArquivo(f);
+    e.target.value = '';
+  });
+  $('btnReset').addEventListener('click', restaurarExemplo);
+
+  novaRota();
+  atualizarTudo();
+}
+
+init();
+</script>
+</body>
+</html>
