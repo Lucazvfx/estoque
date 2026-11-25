@@ -148,12 +148,34 @@
   }
   .toast.show { opacity: .95; }
   .muted { color: var(--slate-2); }
+  .conf { display: inline-block; margin-top: 10px; padding: 4px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .conf.alta { background: #dcfce7; color: #14532d; }
+  .conf.baixa { background: #fde68a; color: #78350f; }
+  .ref-line { font-size: 12.5px; color: var(--slate); margin: -4px 0 12px; }
+  .ref-line:empty { display: none; }
+  label.conf-check { display: inline-flex; align-items: center; gap: 4px; font-weight: 500; font-size: 11.5px; color: var(--slate-2); margin: 4px 0 0; cursor: pointer; }
+
+  /* Barra de total fixa no rodapé (só celular) */
+  .mobile-bar {
+    display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    background: var(--navy); color: #fff; padding: 10px 16px; align-items: center; justify-content: space-between;
+    box-shadow: 0 -2px 10px rgba(0,0,0,.2);
+  }
+  .mobile-bar b { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .mobile-bar button { background: #fff; color: var(--navy); border: 0; border-radius: 6px; padding: 7px 12px; font-weight: 600; }
+  @media (max-width: 920px) {
+    body.tab-sim-on .mobile-bar { display: flex; }
+    body.tab-sim-on main { padding-bottom: 80px; }
+  }
+  #selfTest table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  #selfTest td { padding: 4px; border-bottom: 1px solid var(--line); }
   .print-only { display: none; }
 
   /* Impressão / PDF: só o resumo da cotação */
   @media print {
     body { background: #fff; }
-    header, nav, .no-print, .sim-grid > .form-col, #tab-config { display: none !important; }
+    header, nav, .no-print, .sim-grid > .form-col, #tab-config, .mobile-bar { display: none !important; }
+    .conf { border: 1px solid #000; }
     .sim-grid { display: block; }
     .result { position: static; }
     .total-box { background: #fff; color: #000; border: 2px solid #000; }
@@ -261,7 +283,9 @@
             <div class="lbl">Valor total do frete</div>
             <div class="val" id="rTotal">R$ 0,00</div>
             <div class="sub" id="rTotalSub">&nbsp;</div>
+            <div class="conf" id="rConfianca" hidden></div>
           </div>
+          <div class="ref-line" id="rReferencia"></div>
 
           <div class="pesos">
             <div>Peso real<b id="rPesoReal">0,000 kg</b></div>
@@ -343,6 +367,7 @@
           <label for="fatorCubagem">Fator de cubagem (kg/m³)</label>
           <input type="text" id="fatorCubagem" class="num" inputmode="decimal">
           <div class="hint">Padrão rodoviário: 300 kg/m³.</div>
+          <label class="conf-check"><input type="checkbox" id="fatorConfirmado"> confirmado pela transportadora</label>
         </div>
       </div>
     </div>
@@ -362,6 +387,11 @@
     </div>
   </section>
 </main>
+
+<div class="mobile-bar" id="mobileBar">
+  <div><div style="font-size:11px;color:#b8c7dc">TOTAL DO FRETE</div><b id="mTotal">R$ —</b></div>
+  <button type="button" id="mVer">Ver detalhes</button>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -387,10 +417,16 @@ const SEED = {
       origem: 'VLHP', destino: 'PVHP',
       freteMinimo: 45.00, fretePesoKg: 0, freteValorPct: 4.62, grisPct: 0,
       pedagioFracao: 5.00, despacho: 0, tas: 0, outrasTaxas: 0,
-      icmsPct: 0, prazoDias: 3, faixas: []
+      icmsPct: 0, prazoDias: 3, faixas: [],
+      // Base da estimativa: a única cotação real disponível (print do SSW).
+      referencia: 'Cotação SSW nº VLH 25439 (19/11/2026): NF R$ 1.600,00, 30 kg, 1 volume, sem cubagem',
+      refPesoKg: 30,
+      // O frete mínimo de R$ 45,00 não aparece na cotação: fica como NÃO confirmado.
+      confirmados: ['fretePesoKg', 'freteValorPct', 'grisPct', 'pedagioFracao', 'despacho', 'tas', 'outrasTaxas', 'icmsPct', 'prazoDias']
     }
   ]
 };
+SEED.config.fatorConfirmado = false; // 300 kg/m³ é padrão de mercado, não veio da transportadora
 
 /* Campos tarifários da rota: [chave, rótulo, tipo de formatação] */
 const ROTA_CAMPOS = [
@@ -507,11 +543,37 @@ function normalizarDB(raw) {
     }
     if (rota.icmsPct >= 100) throw new Error(`Rota ${id}: ICMS deve ser menor que 100%.`);
     rota.faixas = normalizarFaixas(r.faixas, id);
+    normalizarReferencia(rota, r);
     rotas.push(rota);
   }
 
   const fator = parseBR(raw.config?.fatorCubagem);
-  return { versao: 1, config: { fatorCubagem: fator > 0 ? fator : 300 }, lojas, rotas };
+  return {
+    versao: 2,
+    config: { fatorCubagem: fator > 0 ? fator : 300, fatorConfirmado: !!raw.config?.fatorConfirmado },
+    lojas, rotas
+  };
+}
+
+const CHAVES_ROTA = ROTA_CAMPOS.map(c => c[0]);
+
+/**
+ * Metadados de confiança da rota: cotação de referência, peso cotado e parâmetros confirmados.
+ * Tabelas sem esses campos (importadas ou da versão 1) são tratadas como totalmente confirmadas,
+ * exceto a rota de exemplo da v1, que recebe os metadados do seed.
+ */
+function normalizarReferencia(rota, r) {
+  let fonte = r;
+  if (!('confirmados' in r)) {
+    const seed = SEED.rotas.find(s => s.origem === rota.origem && s.destino === rota.destino);
+    const igualSeed = seed && CHAVES_ROTA.every(k => parseBR(r[k]) === seed[k]);
+    fonte = igualSeed ? seed : { referencia: r.referencia, refPesoKg: r.refPesoKg, confirmados: CHAVES_ROTA };
+  }
+  let conf = fonte.confirmados;
+  if (typeof conf === 'string') conf = conf.split('|');
+  rota.confirmados = Array.isArray(conf) ? CHAVES_ROTA.filter(k => conf.includes(k)) : [];
+  rota.referencia = String(fonte.referencia ?? '').trim().slice(0, 300);
+  rota.refPesoKg = Math.max(0, parseBR(fonte.refPesoKg));
 }
 
 function normalizarFaixas(faixas, id) {
@@ -730,11 +792,15 @@ function renderResultado(res) {
     $('kpiPct').classList.remove('alarm');
     alerts.innerHTML = '';
     $('btnCopiar').disabled = $('btnImprimir').disabled = true;
+    $('rConfianca').hidden = true;
+    $('rReferencia').innerHTML = '';
+    $('mTotal').textContent = 'R$ —';
     return;
   }
   $('btnCopiar').disabled = $('btnImprimir').disabled = false;
 
   $('rTotal').textContent = fmtBRL(res.total);
+  $('mTotal').textContent = fmtBRL(res.total);
   $('rTotalSub').textContent = `Rota ${rotaId(res.rota.origem, res.rota.destino)} · ${res.lojaOrigem.cidade}/${res.lojaOrigem.uf} → ${res.lojaDestino.cidade}/${res.lojaDestino.uf}`;
   $('rPesoReal').textContent = fmtKg(res.pesoReal);
   $('rPesoCub').textContent = fmtKg(res.pesoCubado);
@@ -762,11 +828,25 @@ function renderResultado(res) {
   $('rPctNF').textContent = fmtPct(res.pctNF);
   $('kpiPct').classList.toggle('alarm', res.pctNF > PCT_ALERTA);
 
-  const msgs = [];
+  // Confiança da estimativa em relação à cotação de referência
+  const avisos = avaliarConfianca(res);
+  const chip = $('rConfianca');
+  if (!res.rota.referencia && !avisos.length) {
+    chip.hidden = true;
+  } else {
+    chip.hidden = false;
+    chip.className = 'conf ' + (avisos.length ? 'baixa' : 'alta');
+    chip.textContent = avisos.length
+      ? `Estimativa com ${avisos.length} ponto${avisos.length > 1 ? 's' : ''} não confirmado${avisos.length > 1 ? 's' : ''}`
+      : 'Dentro do que a cotação de referência confirma';
+  }
+  $('rReferencia').innerHTML = res.rota.referencia ? `<b>Base:</b> ${esc(res.rota.referencia)}` : '';
+
+  const msgs = avisos.map(a => `<div class="alert warn">${a}</div>`);
   if (res.pctNF > PCT_ALERTA) msgs.push(`<div class="alert warn">Frete representa ${fmtPct(res.pctNF)} do valor da NF (acima de ${PCT_ALERTA}%). Avalie consolidar a carga.</div>`);
-  if (res.minimoAplicado) msgs.push(`<div class="alert info">Frete mínimo da rota (${fmtBRL(res.freteMinimo)}) aplicado: as parcelas somaram ${fmtBRL(res.somaParcelas)}.</div>`);
+  if (res.minimoAplicado && res.rota.confirmados.includes('freteMinimo')) msgs.push(`<div class="alert info">Frete mínimo da rota (${fmtBRL(res.freteMinimo)}) aplicado: as parcelas somaram ${fmtBRL(res.somaParcelas)}.</div>`);
   if (res.desconto && res.baseICMS < res.freteMinimo) msgs.push(`<div class="alert warn">O desconto deixou o frete abaixo do mínimo da rota (${fmtBRL(res.freteMinimo)}).</div>`);
-  if (res.pesoCubado > res.pesoReal) msgs.push(`<div class="alert info">Peso cubado maior que o real: cálculo pelo peso cubado.</div>`);
+  if (res.pesoCubado > res.pesoReal && db.config.fatorConfirmado) msgs.push(`<div class="alert info">Peso cubado maior que o real: cálculo pelo peso cubado.</div>`);
   if (!$('incluirICMS').checked && res.rota.icmsPct > 0) msgs.push(`<div class="alert warn">ICMS de ${fmtPct(res.rota.icmsPct)} da rota não incluído no total.</div>`);
   if (res.pesoCalculo === 0) msgs.push(`<div class="alert warn">Informe o peso ou a cubagem da carga.</div>`);
   alerts.innerHTML = msgs.join('');
@@ -776,6 +856,35 @@ function renderResultado(res) {
     ${esc(lojaLabel(res.lojaOrigem))} → ${esc(lojaLabel(res.lojaDestino))}<br>
     NF ${fmtBRL(res.valorNF)} · ${res.volumes} vol. · Cubagem ${fmtNum(res.cubagem, 4)} m³ ·
     Prazo ${res.rota.prazoDias} dias úteis (prev. ${fmtData(res.previsao)})</div>`;
+}
+
+/* Parâmetro da rota -> parcela do resultado que ele gera (para saber se um parâmetro não confirmado pesou no total) */
+const PARAM_PARCELA = {
+  fretePesoKg: 'fretePeso', freteValorPct: 'freteValor', grisPct: 'gris', pedagioFracao: 'pedagio',
+  despacho: 'despacho', tas: 'tas', outrasTaxas: 'outras', icmsPct: 'icms'
+};
+const NOME_CAMPO = Object.fromEntries(ROTA_CAMPOS.map(([k, rot]) => [k, rot.replace(/\s*\(.*\)$/, '')]));
+
+/**
+ * Lista os pontos em que o resultado depende de algo que a cotação de referência NÃO confirma.
+ * Retorna textos (HTML seguro) para exibição; lista vazia = estimativa dentro do confirmado.
+ */
+function avaliarConfianca(res) {
+  const rota = res.rota, conf = new Set(rota.confirmados), out = [];
+  if (res.minimoAplicado && !conf.has('freteMinimo')) {
+    out.push(`Frete mínimo de ${fmtBRL(rota.freteMinimo)} aplicado, mas ele <b>não foi confirmado</b>. As parcelas somam ${fmtBRL(res.somaParcelas)}; o valor real pode ficar entre esses dois.`);
+  }
+  if (rota.refPesoKg > 0 && res.pesoCalculo > rota.refPesoKg) {
+    out.push(`Peso cálculo (${fmtKg(res.pesoCalculo)}) acima do peso cotado (${fmtKg(rota.refPesoKg)}). Para cargas maiores a transportadora pode cobrar frete peso ou outra faixa, o que esta estimativa não prevê.`);
+  }
+  if (res.pesoCubado > res.pesoReal && !db.config.fatorConfirmado) {
+    out.push(`O peso cubado definiu o cálculo, mas o fator de ${fmtNum(db.config.fatorCubagem, 0)} kg/m³ é o padrão de mercado, <b>não confirmado</b> com a transportadora.`);
+  }
+  const naoConf = Object.entries(PARAM_PARCELA)
+    .filter(([k, parcela]) => !conf.has(k) && res[parcela] > 0)
+    .map(([k]) => NOME_CAMPO[k]);
+  if (naoConf.length) out.push(`Parcelas calculadas com parâmetros não confirmados: ${naoConf.map(esc).join(', ')}.`);
+  return out;
 }
 
 /** Texto limpo para WhatsApp/e-mail (só parcelas com valor). */
@@ -805,6 +914,12 @@ function textoResumo(res) {
   L.push('');
   L.push(`*TOTAL DO FRETE: ${fmtBRL(res.total)}*`);
   L.push(`Frete/kg: ${fmtBRL(res.fretePorKg)} | Frete/NF: ${fmtPct(res.pctNF)}`);
+  if (res.rota.referencia) L.push('', `Base da estimativa: ${res.rota.referencia}`);
+  const avisos = avaliarConfianca(res);
+  if (avisos.length) {
+    L.push('*Atenção (valor estimado):*');
+    for (const a of avisos) L.push('- ' + a.replace(/<[^>]+>/g, ''));
+  }
   return L.join('\n');
 }
 
@@ -921,7 +1036,13 @@ function excluirLoja(sigla) {
 function montarCamposRota() {
   $('rotaFields').innerHTML = ROTA_CAMPOS.map(([k, rot, tipo]) =>
     `<div><label for="rf_${k}">${rot}</label>
-     <input type="text" id="rf_${k}" class="num" inputmode="decimal" data-fmt="${tipo}"></div>`).join('');
+     <input type="text" id="rf_${k}" class="num" inputmode="decimal" data-fmt="${tipo}">
+     <label class="conf-check"><input type="checkbox" id="rc_${k}"> confirmado pela transportadora</label></div>`).join('') +
+    `<div style="grid-column:1/-1"><label for="rf_referencia">Cotação de referência (de onde vieram os valores)</label>
+     <input type="text" id="rf_referencia" maxlength="300" placeholder="Ex.: Cotação SSW nº 123 de 19/11/2026, NF R$ 1.600, 30 kg"></div>
+     <div><label for="rf_refPesoKg">Peso cotado (kg)</label>
+     <input type="text" id="rf_refPesoKg" class="num" inputmode="decimal" data-fmt="kg">
+     <div class="hint">Acima deste peso o resultado é marcado como estimativa. 0 = sem limite.</div></div>`;
 }
 
 function preencherSelectsRota() {
@@ -952,13 +1073,18 @@ function lerFaixasForm() {
 function preencherFormRota(r) {
   $('rotaOrigem').value = r.origem;
   $('rotaDestino').value = r.destino;
-  for (const [k, , tipo] of ROTA_CAMPOS) $('rf_' + k).value = FORMATTERS[tipo](r[k] || 0);
+  for (const [k, , tipo] of ROTA_CAMPOS) {
+    $('rf_' + k).value = FORMATTERS[tipo](r[k] || 0);
+    $('rc_' + k).checked = (r.confirmados || []).includes(k);
+  }
+  $('rf_referencia').value = r.referencia || '';
+  $('rf_refPesoKg').value = fmtNum(r.refPesoKg || 0, 3);
   renderFaixas(r.faixas || []);
 }
 
 function novaRota(origem, destino) {
   $('rotaEditId').value = '';
-  const base = { origem: origem || db.lojas[0]?.sigla, destino: destino || db.lojas[1]?.sigla, faixas: [] };
+  const base = { origem: origem || db.lojas[0]?.sigla, destino: destino || db.lojas[1]?.sigla, faixas: [], confirmados: [], referencia: '', refPesoKg: 0 };
   for (const [k] of ROTA_CAMPOS) base[k] = 0;
   preencherFormRota(base);
   $('rotaSubmit').textContent = 'Adicionar rota';
@@ -992,6 +1118,9 @@ function salvarRota(ev) {
     rota[k] = tipo === 'int' ? Math.round(n) : n;
   }
   if (rota.icmsPct >= 100) return toast('ICMS deve ser menor que 100%.');
+  rota.confirmados = CHAVES_ROTA.filter(k => $('rc_' + k).checked);
+  rota.referencia = $('rf_referencia').value.trim().slice(0, 300);
+  rota.refPesoKg = Math.max(0, parseBR($('rf_refPesoKg').value));
   const id = rotaId(rota.origem, rota.destino);
   try {
     rota.faixas = normalizarFaixas(lerFaixasForm(), id);
@@ -1047,7 +1176,7 @@ function renderRotas() {
   t.innerHTML = `<caption style="text-align:left;font-size:12.5px;color:var(--slate);padding-bottom:6px">
       ${db.rotas.length} de ${total} rotas possíveis cadastradas (cada sentido é uma rota).</caption>
     <tr><th>Rota</th><th>Mínimo</th><th>R$/kg</th><th>Faixas</th><th>Frete Valor</th><th>GRIS</th><th>Pedágio/100kg</th>
-    <th>Despacho</th><th>TAS</th><th>Outras</th><th>ICMS</th><th>Prazo</th><th></th></tr>` +
+    <th>Despacho</th><th>TAS</th><th>Outras</th><th>ICMS</th><th>Prazo</th><th>Confirmados</th><th></th></tr>` +
     db.rotas.map(r => {
       const id = rotaId(r.origem, r.destino);
       return `<tr class="${id === editId ? 'editing' : ''}">
@@ -1058,6 +1187,7 @@ function renderRotas() {
         <td class="num">${fmtBRL(r.pedagioFracao)}</td><td class="num">${fmtBRL(r.despacho)}</td>
         <td class="num">${fmtBRL(r.tas)}</td><td class="num">${fmtBRL(r.outrasTaxas)}</td>
         <td class="num">${fmtPct(r.icmsPct)}</td><td class="num">${r.prazoDias} d</td>
+        <td class="num" title="${esc(r.referencia || 'Sem cotação de referência')}">${r.confirmados.length}/${CHAVES_ROTA.length}</td>
         <td><button type="button" class="btn sec sm" data-edit-rota="${esc(id)}">Editar</button>
             <button type="button" class="btn sec sm" data-inv-rota="${esc(id)}" title="Criar rota no sentido contrário">Inversa</button>
             <button type="button" class="btn danger sm" data-del-rota="${esc(id)}">Excluir</button></td></tr>`;
@@ -1085,35 +1215,43 @@ function exportarJSON() {
 
 /*
   Formato CSV (separador ";", decimais com vírgula, compatível com Excel pt-BR):
-    tipo;sigla;nome;cidade;uf;cep;origem;destino;<campos da rota>;faixas
-  - Linhas LOJA preenchem sigla..cep; linhas ROTA preenchem origem, destino, tarifas e faixas.
-  - Faixas: "até=valor" separados por "|", ex.: 10=12,50|30=20,00
-  - Linha CONFIG: fatorCubagem na coluna "nome".
+    tipo;sigla;nome;cidade;uf;cep;origem;destino;<campos da rota>;faixas;referencia;refPesoKg;confirmados;fatorCubagem;fatorConfirmado
+  - Linhas LOJA preenchem sigla..cep; linhas ROTA preenchem origem, destino, tarifas, faixas e metadados.
+  - Faixas: "até=valor" separados por "|", ex.: 10=12,5|30=20
+  - confirmados: chaves dos parâmetros confirmados separadas por "|".
+  - Linha CONFIG: fatorCubagem e fatorConfirmado (S/N).
+  - Números exportados sem arredondar (precisão total), com vírgula decimal.
 */
-const CSV_COLS = ['tipo', 'sigla', 'nome', 'cidade', 'uf', 'cep', 'origem', 'destino', ...ROTA_CAMPOS.map(c => c[0]), 'faixas'];
+const CSV_COLS = ['tipo', 'sigla', 'nome', 'cidade', 'uf', 'cep', 'origem', 'destino', ...CHAVES_ROTA,
+  'faixas', 'referencia', 'refPesoKg', 'confirmados', 'fatorCubagem', 'fatorConfirmado'];
 
 function csvCampo(v) {
   const s = String(v ?? '');
   return /[;"\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
+const numCSV = n => String(Number(n) || 0).replace('.', ',');
 
-function exportarCSV() {
+function gerarCSV(dados) {
   const linhas = [CSV_COLS.join(';')];
   const vazio = () => Object.fromEntries(CSV_COLS.map(c => [c, '']));
-  const cfg = vazio(); cfg.tipo = 'CONFIG'; cfg.nome = fmtNum(db.config.fatorCubagem, 2);
-  linhas.push(CSV_COLS.map(c => csvCampo(cfg[c])).join(';'));
-  for (const l of db.lojas) {
-    const o = vazio(); Object.assign(o, { tipo: 'LOJA', sigla: l.sigla, nome: l.nome, cidade: l.cidade, uf: l.uf, cep: l.cep });
-    linhas.push(CSV_COLS.map(c => csvCampo(o[c])).join(';'));
+  const add = o => linhas.push(CSV_COLS.map(c => csvCampo(o[c])).join(';'));
+  add(Object.assign(vazio(), { tipo: 'CONFIG', fatorCubagem: numCSV(dados.config.fatorCubagem), fatorConfirmado: dados.config.fatorConfirmado ? 'S' : 'N' }));
+  for (const l of dados.lojas) add(Object.assign(vazio(), { tipo: 'LOJA', sigla: l.sigla, nome: l.nome, cidade: l.cidade, uf: l.uf, cep: l.cep }));
+  for (const r of dados.rotas) {
+    const o = Object.assign(vazio(), { tipo: 'ROTA', origem: r.origem, destino: r.destino });
+    for (const k of CHAVES_ROTA) o[k] = numCSV(r[k]);
+    o.faixas = r.faixas.map(f => `${numCSV(f.ate)}=${numCSV(f.valor)}`).join('|');
+    o.referencia = r.referencia;
+    o.refPesoKg = numCSV(r.refPesoKg);
+    o.confirmados = r.confirmados.join('|');
+    add(o);
   }
-  for (const r of db.rotas) {
-    const o = vazio(); o.tipo = 'ROTA'; o.origem = r.origem; o.destino = r.destino;
-    for (const [k, , tipo] of ROTA_CAMPOS) o[k] = tipo === 'int' ? String(r[k]) : fmtNum(r[k], tipo === 'rate' ? 4 : 2).replace(/\./g, '');
-    o.faixas = r.faixas.map(f => `${fmtNum(f.ate, 3).replace(/\./g, '')}=${fmtNum(f.valor, 2).replace(/\./g, '')}`).join('|');
-    linhas.push(CSV_COLS.map(c => csvCampo(o[c])).join(';'));
-  }
+  return linhas.join('\r\n');
+}
+
+function exportarCSV() {
   // BOM para o Excel reconhecer UTF-8 (acentos)
-  baixar(`tabela-fretes-${hoje()}.csv`, '﻿' + linhas.join('\r\n'), 'text/csv;charset=utf-8');
+  baixar(`tabela-fretes-${hoje()}.csv`, '﻿' + gerarCSV(db), 'text/csv;charset=utf-8');
 }
 
 /** Parser CSV simples com suporte a aspas. Detecta separador ";" ou ",". */
@@ -1150,7 +1288,11 @@ function csvParaDB(texto) {
   const out = { config: {}, lojas: [], rotas: [] };
   for (const r of rows.slice(1)) {
     const tipo = get(r, 'tipo').toUpperCase();
-    if (tipo === 'CONFIG') out.config.fatorCubagem = parseBR(get(r, 'nome'));
+    if (tipo === 'CONFIG') {
+      // CSV da versão 1 guardava o fator na coluna "nome"
+      out.config.fatorCubagem = parseBR(get(r, 'fatorCubagem') || get(r, 'nome'));
+      out.config.fatorConfirmado = /^(s|sim|1|true)$/i.test(get(r, 'fatorConfirmado'));
+    }
     else if (tipo === 'LOJA') out.lojas.push({ sigla: get(r, 'sigla'), nome: get(r, 'nome'), cidade: get(r, 'cidade'), uf: get(r, 'uf'), cep: get(r, 'cep') });
     else if (tipo === 'ROTA') {
       const rota = { origem: get(r, 'origem'), destino: get(r, 'destino') };
@@ -1159,6 +1301,11 @@ function csvParaDB(texto) {
         const [ate, valor] = p.split('=');
         return { ate, valor };
       });
+      if ('confirmados' in idx) {
+        rota.confirmados = get(r, 'confirmados');
+        rota.referencia = get(r, 'referencia');
+        rota.refPesoKg = get(r, 'refPesoKg');
+      }
       out.rotas.push(rota);
     }
   }
@@ -1201,6 +1348,7 @@ function restaurarExemplo() {
    9. LIGAÇÕES DE EVENTOS E INICIALIZAÇÃO
    ===================================================================== */
 function abrirAba(id) {
+  document.body.classList.toggle('tab-sim-on', id === 'tab-sim');
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === id));
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
 }
@@ -1211,6 +1359,7 @@ function atualizarTudo() {
   renderLojas();
   renderRotas();
   $('fatorCubagem').value = fmtNum(db.config.fatorCubagem, 2);
+  $('fatorConfirmado').checked = db.config.fatorConfirmado;
   calcular();
 }
 
@@ -1247,6 +1396,7 @@ function init() {
   });
   $('btnCopiar').addEventListener('click', copiarResumo);
   $('btnImprimir').addEventListener('click', () => window.print());
+  $('mVer').addEventListener('click', () => document.querySelector('.result').scrollIntoView({ behavior: 'smooth' }));
 
   // Lojas
   $('lojaForm').addEventListener('submit', salvarLoja);
@@ -1293,6 +1443,12 @@ function init() {
     toast('Fator de cubagem salvo.');
   });
 
+  $('fatorConfirmado').addEventListener('change', e => {
+    db.config.fatorConfirmado = e.target.checked;
+    salvar();
+    calcular();
+  });
+
   // Dados
   $('btnExportJSON').addEventListener('click', exportarJSON);
   $('btnExportCSV').addEventListener('click', exportarCSV);
@@ -1308,7 +1464,70 @@ function init() {
   atualizarTudo();
 }
 
+/* =====================================================================
+   10. AUTOTESTE — abra o arquivo com "?teste=1" no fim do endereço
+   Fixa o caso real (cotação SSW = R$ 78,92) e as regras de borda.
+   ===================================================================== */
+function autoTeste() {
+  const casos = [];
+  const eq = (nome, obtido, esperado) => casos.push({ nome, obtido, esperado, ok: JSON.stringify(obtido) === JSON.stringify(esperado) });
+  const seedRota = clone(SEED.rotas[0]);
+  const op = { fatorCubagem: 300, incluirICMS: true };
+  const calc = (carga, extra = {}, rota = seedRota) => calcularFrete(rota, carga, { ...op, ...extra });
+
+  // Caso real do SSW (VLH 25439)
+  const ssw = calc({ valorNF: 1600, pesoReal: 30, cubagem: 0 });
+  eq('SSW: frete valor', ssw.freteValor, 73.92);
+  eq('SSW: pedágio', ssw.pedagio, 5);
+  eq('SSW: total', ssw.total, 78.92);
+  eq('SSW: frete/kg', r2(ssw.fretePorKg), 2.63);
+  eq('SSW: % NF', r2(ssw.pctNF), 4.93);
+  eq('SSW: sem avisos de confiança', avaliarConfianca({ ...ssw, rota: seedRota }).length, 0);
+
+  // Regras de borda
+  const min = calc({ valorNF: 500, pesoReal: 30 });
+  eq('Mínimo aplicado (NF 500)', [min.total, min.minimoAplicado], [45, true]);
+  eq('Mínimo não confirmado gera aviso', avaliarConfianca({ ...min, rota: seedRota }).length > 0, true);
+  eq('Cubagem 0,5 m³ → 150 kg, 2 frações', [calc({ valorNF: 1600, pesoReal: 30, cubagem: 0.5 }).pesoCalculo, calc({ valorNF: 1600, pesoReal: 30, cubagem: 0.5 }).pedagio], [150, 10]);
+  eq('100 kg = 1 fração', calc({ valorNF: 1600, pesoReal: 100 }).fracoes, 1);
+  eq('100,5 kg = 2 frações', calc({ valorNF: 1600, pesoReal: 100.5 }).fracoes, 2);
+  eq('Peso acima do cotado gera aviso', avaliarConfianca({ ...calc({ valorNF: 1600, pesoReal: 31 }), rota: seedRota }).length > 0, true);
+  eq('Desconto 10%', calc({ valorNF: 1600, pesoReal: 30 }, { descontoPct: 10 }).total, 71.03);
+
+  const rf = { ...seedRota, freteMinimo: 0, fretePesoKg: 0.5, freteValorPct: 1, grisPct: 0.3, despacho: 10, tas: 2, icmsPct: 12,
+    faixas: [{ ate: 10, valor: 20 }, { ate: 50, valor: 40 }] };
+  eq('Faixa: 10 kg', calc({ valorNF: 1000, pesoReal: 10 }, {}, rf).fretePeso, 20);
+  eq('Faixa: 50 kg', calc({ valorNF: 1000, pesoReal: 50 }, {}, rf).fretePeso, 40);
+  eq('Faixa: 80 kg = 40 + 30 × 0,50', calc({ valorNF: 1000, pesoReal: 80 }, {}, rf).fretePeso, 55);
+  eq('ICMS 12% por dentro (85 → 96,59)', calc({ valorNF: 1000, pesoReal: 80 }, {}, rf).total, 96.59);
+  eq('ICMS desligado', calc({ valorNF: 1000, pesoReal: 80 }, { incluirICMS: false }, rf).total, 85);
+
+  // Conversões e persistência
+  eq('parseBR', ['1.600,00', '30,5', '30.5', '', 'abc'].map(parseBR), [1600, 30.5, 30.5, 0, 0]);
+  const dbSeed = normalizarDB(clone(SEED));
+  eq('CSV ida e volta', normalizarDB(csvParaDB(gerarCSV(dbSeed))), dbSeed);
+  eq('JSON v1 sem metadados recebe os do seed', normalizarDB({ lojas: SEED.lojas, rotas: [{ ...SEED.rotas[0], confirmados: undefined }].map(r => { const c = { ...r }; delete c.confirmados; delete c.referencia; delete c.refPesoKg; return c; }) }).rotas[0].confirmados, SEED.rotas[0].confirmados);
+  return casos;
+}
+window.autoTeste = autoTeste;
+
+function mostrarAutoTeste() {
+  const casos = autoTeste();
+  const falhas = casos.filter(c => !c.ok);
+  const box = document.createElement('div');
+  box.id = 'selfTest';
+  box.className = 'card';
+  box.innerHTML = `<h2>Autoteste: ${casos.length - falhas.length}/${casos.length} ok</h2>
+    <div class="alert ${falhas.length ? 'err' : 'info'}">${falhas.length ? falhas.length + ' falha(s)' : 'Todos os casos passaram.'}</div>
+    <table>${casos.map(c => `<tr><td>${c.ok ? '✅' : '❌'}</td><td>${esc(c.nome)}</td>
+      <td>${c.ok ? '' : 'obtido ' + esc(JSON.stringify(c.obtido)) + ' / esperado ' + esc(JSON.stringify(c.esperado))}</td></tr>`).join('')}</table>`;
+  document.querySelector('main').prepend(box);
+  console.log('autoTeste', falhas.length ? falhas : 'ok');
+}
+
 init();
+abrirAba('tab-sim');
+if (/[?&]teste=1\b/.test(location.search)) mostrarAutoTeste();
 </script>
 </body>
 </html>
